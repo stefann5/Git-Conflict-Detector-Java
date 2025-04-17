@@ -25,8 +25,8 @@ Git Conflict Detector helps developers identify potential merge conflicts before
 ### Building from Source
 
 ```bash
-git clone https://github.com/yourusername/git-conflict-detector.git
-cd git-conflict-detector
+git clone https://github.com/stefann5/git-conflict-detector.git
+cd git-conflict-detector-java
 ./mvnw clean package
 ```
 
@@ -35,7 +35,7 @@ cd git-conflict-detector
 ### Command Line Interface
 
 ```bash
-java -jar git-conflict-detector.jar --owner <owner> --repo <repo> --branch-a <remote-branch> --branch-b <local-branch> --token <github-token>
+java -jar target/git-conflict-detector-1.0.0-jar-with-dependencies.jar --owner <owner> --repo <repo> --branch-a <remote-branch> --branch-b <local-branch> --token <github-token>
 ```
 
 #### Options
@@ -56,7 +56,7 @@ java -jar git-conflict-detector.jar --owner <owner> --repo <repo> --branch-a <re
 #### Example
 
 ```bash
-java -jar git-conflict-detector.jar --owner octocat --repo hello-world --branch-a main --branch-b feature-branch --token ghp_123456789abcdef --output json
+java -jar git-conflict-detector.jar --owner stefann5 --repo hello-world --branch-a main --branch-b feature-branch --token ghp_123456789abcdef --output json
 ```
 
 ### Java Library Usage
@@ -66,7 +66,7 @@ import com.github.gitconflictdetector.*;
 
 // Create configuration
 GitConflictDetectorConfig config = new GitConflictDetectorConfig.Builder()
-    .owner("octocat")
+    .owner("stefann5")
     .repo("hello-world")
     .accessToken("ghp_123456789abcdef")
     .localRepoPath("/path/to/local/repo")
