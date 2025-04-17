@@ -6,17 +6,13 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.mockito.junit.jupiter.MockitoSettings;
-import org.mockito.quality.Strictness;
 
 import java.io.ByteArrayInputStream;
-import java.io.File;
 import java.io.IOException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -273,6 +269,86 @@ class GitConflictDetectorTest {
         assertTrue(result.getError().contains("Git command failed"));
     }
 
+    @Test
+    void findPotentialConflicts_withNetworkFailure_shouldReturnError() throws Exception {
+        // Setup command responses
+        commandExecutor.setResponses(
+                "true",                         // rev-parse response
+                "* branchA\n  branchB",         // branch list response
+                "mergebasecommithash123"        // merge-base response
+        );
+
+        // Setup mock HTTP client to simulate network failure
+        when(mockHttpClient.sendAsync(any(HttpRequest.class), any(HttpResponse.BodyHandler.class)))
+                .thenReturn(CompletableFuture.failedFuture(
+                        new IOException("Network connection failed")));
+
+        CompletableFuture<ConflictDetectionResult> resultFuture = detector.findPotentialConflicts();
+        ConflictDetectionResult result = resultFuture.get();
+
+        // Verify error is returned
+        assertNotNull(result.getError());
+        assertTrue(result.getError().contains("Error getting remote changes") ||
+                result.getError().contains("Network connection failed"));
+        assertTrue(result.getPotentialConflicts().isEmpty());
+    }
+
+    @Test
+    void findPotentialConflicts_withDifferentFileStatuses_shouldIdentifyCorrectly() throws Exception {
+        // Setup command responses with different status types (Modified, Added, Deleted)
+        commandExecutor.setResponses(
+                "true",                         // rev-parse response
+                "* branchA\n  branchB",         // branch list response
+                "mergebasecommithash123",       // merge-base response
+                "M\tsrc/file1.js\nA\tsrc/file2.js\nD\tsrc/file3.js" // Different status types
+        );
+
+        // Setup mock HTTP client with various statuses
+        setupGithubApiMock(200,
+                "{\"files\": [" +
+                        "{\"filename\": \"src/file1.js\", \"status\": \"modified\"}, " +
+                        "{\"filename\": \"src/file2.js\", \"status\": \"added\"}, " +
+                        "{\"filename\": \"src/file3.js\", \"status\": \"removed\"}, " +
+                        "{\"filename\": \"src/file4.js\", \"status\": \"modified\"}" +
+                        "]}");
+
+        // Execute the method under test
+        CompletableFuture<ConflictDetectionResult> resultFuture = detector.findPotentialConflicts();
+        ConflictDetectionResult result = resultFuture.get();
+
+        // Verify results
+        assertNull(result.getError());
+        assertEquals("mergebasecommithash123", result.getMergeBaseCommit());
+        assertEquals(3, result.getPotentialConflicts().size());
+        assertTrue(result.getPotentialConflicts().contains("src/file1.js"));
+        assertTrue(result.getPotentialConflicts().contains("src/file2.js"));
+        assertTrue(result.getPotentialConflicts().contains("src/file3.js"));
+        assertFalse(result.getPotentialConflicts().contains("src/file4.js")); // Only in remote
+    }
+
+    @Test
+    void findPotentialConflicts_withEmptyFilesFromGitHub_shouldHandleGracefully() throws Exception {
+        // Setup command responses
+        commandExecutor.setResponses(
+                "true",                         // rev-parse response
+                "* branchA\n  branchB",         // branch list response
+                "mergebasecommithash123",       // merge-base response
+                "M\tsrc/file1.js\nA\tsrc/file2.js" // diff response
+        );
+
+        // Setup mock HTTP client with empty files array
+        setupGithubApiMock(200, "{\"files\": []}");
+
+        // Execute the method under test
+        CompletableFuture<ConflictDetectionResult> resultFuture = detector.findPotentialConflicts();
+        ConflictDetectionResult result = resultFuture.get();
+
+        // Verify results
+        assertNull(result.getError());
+        assertEquals("mergebasecommithash123", result.getMergeBaseCommit());
+        assertTrue(result.getPotentialConflicts().isEmpty()); // No conflicts with empty remote files
+    }
+
     // Helper methods
 
     private void setupMockProcess(int exitCode) throws Exception {
@@ -290,36 +366,3 @@ class GitConflictDetectorTest {
     }
 }
 
-/**
- * Custom class to handle command execution for testing.
- * This replaces ProcessBuilder which can't be mocked.
- */
-class TestCommandExecutor implements CommandExecutor {
-    private final Process mockProcess;
-    private String[] responses;
-    private int currentResponseIndex = 0;
-
-    public TestCommandExecutor(Process mockProcess) {
-        this.mockProcess = mockProcess;
-    }
-
-    public void setResponses(String... responses) {
-        this.responses = responses;
-        this.currentResponseIndex = 0;
-    }
-
-    public Process executeCommand(String workingDir, String command) throws IOException {
-        if (responses != null && currentResponseIndex < responses.length) {
-            // Set up the next response
-            ByteArrayInputStream inputStream = new ByteArrayInputStream(
-                    responses[currentResponseIndex++].getBytes());
-            when(mockProcess.getInputStream()).thenReturn(inputStream);
-            return mockProcess;
-        } else {
-            // If we've run out of pre-configured responses, return empty
-            ByteArrayInputStream inputStream = new ByteArrayInputStream("".getBytes());
-            when(mockProcess.getInputStream()).thenReturn(inputStream);
-            return mockProcess;
-        }
-    }
-}
