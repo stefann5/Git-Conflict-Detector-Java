@@ -13,7 +13,10 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -349,7 +352,162 @@ class GitConflictDetectorTest {
         assertTrue(result.getPotentialConflicts().isEmpty()); // No conflicts with empty remote files
     }
 
-    // Helper methods
+    @Test
+    void findPotentialConflicts_with1000Files_shouldHandleLargeNumberOfFiles() throws Exception {
+        // Generate a large diff response with 1000 files
+        StringBuilder localDiffBuilder = new StringBuilder();
+        for (int i = 1; i <= 1000; i++) {
+            String status = (i % 3 == 0) ? "M" : (i % 3 == 1) ? "A" : "D";
+            localDiffBuilder.append(status).append("\tsrc/file").append(i).append(".js\n");
+        }
+
+        // Setup all command responses together
+        commandExecutor.setResponses(
+                "true",                         // rev-parse response
+                "* branchA\n  branchB",         // branch list response
+                "mergebasecommithash123",       // merge-base response
+                localDiffBuilder.toString()     // large diff response
+        );
+
+        // Generate GitHub API response with 1000 files
+        // Make 500 of them overlap with local changes (every other file)
+        StringBuilder githubResponseBuilder = new StringBuilder("{\"files\": [");
+        for (int i = 1; i <= 1000; i += 2) { // Every odd-numbered file will be in both sets
+            String status = (i % 3 == 0) ? "modified" : (i % 3 == 1) ? "added" : "removed";
+            githubResponseBuilder.append("{\"filename\": \"src/file").append(i).append(".js\", \"status\": \"")
+                    .append(status).append("\"}");
+
+            if (i < 999) {
+                githubResponseBuilder.append(", ");
+            }
+        }
+        githubResponseBuilder.append("]}");
+
+        // Setup mock HTTP client with the large response
+        setupGithubApiMock(200, githubResponseBuilder.toString());
+
+        // Execute the method under test
+        CompletableFuture<ConflictDetectionResult> resultFuture = detector.findPotentialConflicts();
+        ConflictDetectionResult result = resultFuture.get();
+
+        // Verify results
+        assertNull(result.getError(), "There should be no error when processing 1000 files");
+        assertEquals("mergebasecommithash123", result.getMergeBaseCommit());
+
+        // We expect 500 conflicts (every odd-numbered file from 1 to 999)
+        assertEquals(500, result.getPotentialConflicts().size(),
+                "Should identify exactly 500 potential conflicts");
+
+        // Check a few specific files to verify correctness
+        assertTrue(result.getPotentialConflicts().contains("src/file1.js"));
+        assertTrue(result.getPotentialConflicts().contains("src/file501.js"));
+        assertTrue(result.getPotentialConflicts().contains("src/file999.js"));
+
+        // Verify files that should NOT be in the conflict list
+        assertFalse(result.getPotentialConflicts().contains("src/file2.js"));
+        assertFalse(result.getPotentialConflicts().contains("src/file500.js"));
+        assertFalse(result.getPotentialConflicts().contains("src/file1000.js"));
+
+        // Verify the correct commands were executed
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("rev-parse"));
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("branch"));
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("merge-base"));
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("diff"));
+    }
+
+    @Test
+    void findPotentialConflicts_with100000FilesInBoth_shouldHandleVeryLargeNumberOfFiles() throws Exception {
+        // Generate 100,000 files for the local diff response
+        StringBuilder localDiffBuilder = new StringBuilder();
+        for (int i = 1; i <= 100000; i++) {
+            String status = (i % 3 == 0) ? "M" : (i % 3 == 1) ? "A" : "D";
+            localDiffBuilder.append(status).append("\tsrc/file").append(i).append(".js\n");
+        }
+
+        // Setup all command responses together
+        commandExecutor.setResponses(
+                "true",                         // rev-parse response
+                "* branchA\n  branchB",         // branch list response
+                "mergebasecommithash123",       // merge-base response
+                localDiffBuilder.toString()     // very large diff response with 100,000 files
+        );
+
+
+        // Start with opening of JSON
+        String jsonStart = "{\"files\": [";
+
+        int expectedConflictCount = 0;
+
+        // Create a smaller sample of expected conflicts for verification
+        List<Integer> sampleConflictFiles = new ArrayList<>();
+
+        // Generate the mock HTTP response - every file with even number will conflict
+        StringBuilder mockResponseBuilder = new StringBuilder(jsonStart);
+
+        for (int i = 1; i <= 100000; i++) {
+            // For even-numbered files, use the same file number to create conflicts
+            int fileNum = (i % 2 == 0) ? i : i + 100000;
+
+            // Count expected conflicts
+            if (i % 2 == 0) {
+                expectedConflictCount++;
+
+                // Add some sample files for explicit verification
+                if (i == 2 || i == 50000 || i == 100000) {
+                    sampleConflictFiles.add(i);
+                }
+            }
+
+            String status = (i % 3 == 0) ? "modified" : (i % 3 == 1) ? "added" : "removed";
+
+            mockResponseBuilder.append("{\"filename\": \"src/file")
+                    .append(fileNum)
+                    .append(".js\", \"status\": \"")
+                    .append(status)
+                    .append("\"}");
+
+            // Add comma if not the last element
+            if (i < 100000) {
+                mockResponseBuilder.append(", ");
+            }
+        }
+
+        mockResponseBuilder.append("]}");
+
+        // Setup mock HTTP client with the very large response
+        setupGithubApiMock(200, mockResponseBuilder.toString());
+
+        // Execute the method under test with a timeout to prevent hanging
+        CompletableFuture<ConflictDetectionResult> resultFuture = detector.findPotentialConflicts();
+
+        // Set a timeout to prevent test from hanging if there are performance issues
+        ConflictDetectionResult result = resultFuture.get(60, TimeUnit.SECONDS);
+
+        // Verify results
+        assertNull(result.getError(), "There should be no error when processing 100,000 files");
+        assertEquals("mergebasecommithash123", result.getMergeBaseCommit());
+
+        // We expect exactly 50,000 conflicts (every even-numbered file)
+        assertEquals(expectedConflictCount, result.getPotentialConflicts().size(),
+                "Should identify exactly " + expectedConflictCount + " potential conflicts");
+
+        // Check sample files to verify correctness
+        for (Integer fileNum : sampleConflictFiles) {
+            String filename = "src/file" + fileNum + ".js";
+            assertTrue(result.getPotentialConflicts().contains(filename),
+                    "Expected conflict file missing: " + filename);
+        }
+
+        // Verify files that should NOT be in the conflict list
+        assertFalse(result.getPotentialConflicts().contains("src/file100001.js"));
+        assertFalse(result.getPotentialConflicts().contains("src/file199999.js"));
+
+        // Verify the correct commands were executed
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("rev-parse"));
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("branch"));
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("merge-base"));
+        verify(commandExecutor, atLeastOnce()).executeCommand(eq(defaultConfig.getLocalRepoPath()), contains("diff"));
+    }
 
     private void setupMockProcess(int exitCode) throws Exception {
         when(mockProcess.waitFor()).thenReturn(exitCode);
